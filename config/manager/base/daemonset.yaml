@@ -70,6 +70,11 @@ spec:
               add:
                 - SYS_ADMIN
                 - NET_ADMIN
+                # Reading /proc/<pid>/ns/net of another pod's process is subject to
+                # a ptrace access check, which fails without this capability when the
+                # target process lives in a different user namespace or runs as a
+                # different user, as with sandboxed runtimes.
+                - SYS_PTRACE
           volumeMounts:
             - name: host
               mountPath: /host

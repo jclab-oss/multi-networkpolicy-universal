@@ -127,6 +127,7 @@ spec:
             add:
             - SYS_ADMIN
             - NET_ADMIN
+            - SYS_PTRACE
         volumeMounts:
         - mountPath: /host
           name: host

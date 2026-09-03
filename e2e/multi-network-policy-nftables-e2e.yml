@@ -130,6 +130,7 @@ spec:
             add:
             - SYS_ADMIN
             - NET_ADMIN
+            - SYS_PTRACE
           privileged: true
         volumeMounts:
         - mountPath: /host

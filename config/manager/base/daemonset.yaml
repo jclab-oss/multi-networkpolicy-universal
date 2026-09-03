@@ -66,6 +66,11 @@ spec:
               cpu: 100m
               memory: 150Mi
           securityContext:
+            # The default container AppArmor profile only allows ptrace of peers under
+            # the same profile, which blocks reading /proc/<pid>/ns/net of pods run by
+            # a sandboxed runtime regardless of CAP_SYS_PTRACE.
+            appArmorProfile:
+              type: Unconfined
             capabilities:
               add:
                 - SYS_ADMIN

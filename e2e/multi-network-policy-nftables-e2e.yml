@@ -126,6 +126,8 @@ spec:
             cpu: 100m
             memory: 80Mi
         securityContext:
+          appArmorProfile:
+            type: Unconfined
           capabilities:
             add:
             - SYS_ADMIN

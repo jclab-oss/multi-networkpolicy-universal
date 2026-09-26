@@ -24,3 +24,4 @@ spec:
               add:
                 - SYS_ADMIN
                 - NET_ADMIN
+                - SYS_PTRACE

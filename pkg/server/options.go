@@ -31,7 +31,11 @@ import (
 	"k8s.io/klog/v2"
 )
 
-const defaultSyncPeriod = 30
+const (
+	defaultSyncPeriod       = 30
+	defaultBPFPinPath       = "/sys/fs/bpf/multi-networkpolicy"
+	defaultTCXFlowTableSize = 65536
+)
 
 // Options stores option for the command
 type Options struct {
@@ -54,6 +58,11 @@ type Options struct {
 	// healthBindAddress is the IP address the health HTTP server binds to.
 	// Defaults to "" (all interfaces); set to "127.0.0.1" to restrict to loopback.
 	healthBindAddress string
+	// tcxRuntimeClasses lists the RuntimeClass names whose pods are
+	// enforced by the TCX datapath instead of nftables.
+	tcxRuntimeClasses []string
+	bpfPinPath        string
+	tcxFlowTableSize  uint32
 
 	// updated by command line parsing
 	allowSrcPrefix []string
@@ -70,6 +79,11 @@ type ReconcilerConfig struct {
 	NetworkPlugins           []string
 	SyncPeriodSeconds        int
 	CommonRuleConfig         controllers.CommonRuleConfig
+	// TCXRuntimeClasses enables the TCX datapath for pods of these
+	// RuntimeClasses; empty disables it.
+	TCXRuntimeClasses []string
+	BPFPinPath        string
+	TCXFlowTableSize  uint32
 }
 
 // AddFlags adds command line flags into command
@@ -94,6 +108,9 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.allowDstPrefixText, "allow-dst-prefix", "", "Accept destination IP prefix list, comma separated CIDRs (e.g. \"fe80::/10,ff00::/8\")")
 	fs.IntVar(&o.healthPort, "health-port", 0, "TCP port for the health HTTP server (0 to disable, 1-65535 to enable).")
 	fs.StringVar(&o.healthBindAddress, "health-bind-address", "", "IP address the health HTTP server binds to (empty = all interfaces, 127.0.0.1 = loopback only).")
+	fs.StringSliceVar(&o.tcxRuntimeClasses, "tcx-runtime-classes", nil, "RuntimeClass names whose pods are policed by eBPF programs on the TCX hooks of their interfaces instead of nftables, for sandboxed runtimes whose traffic bypasses netfilter such as Kata Containers (e.g. \"kata,kata-qemu\"). Requires Linux 6.6 or later and bpffs.")
+	fs.StringVar(&o.bpfPinPath, "bpf-pin-path", defaultBPFPinPath, "bpffs directory where the TCX datapath pins its programs and flow tables.")
+	fs.Uint32Var(&o.tcxFlowTableSize, "tcx-flow-table-size", defaultTCXFlowTableSize, "Number of connections the TCX datapath tracks across all pods of the node.")
 	fs.AddGoFlagSet(flag.CommandLine)
 }
 
@@ -130,6 +147,19 @@ func (o *Options) Validate() error {
 
 	if err := parseIPPrefixText(o.allowDstPrefixText, &o.allowDstPrefix); err != nil {
 		return err
+	}
+	for _, rc := range o.tcxRuntimeClasses {
+		if strings.TrimSpace(rc) == "" {
+			return fmt.Errorf("tcx-runtime-classes must not contain empty names")
+		}
+	}
+	if len(o.tcxRuntimeClasses) > 0 {
+		if !filepath.IsAbs(o.bpfPinPath) {
+			return fmt.Errorf("bpf-pin-path must be an absolute path")
+		}
+		if o.tcxFlowTableSize == 0 {
+			return fmt.Errorf("tcx-flow-table-size must be greater than 0")
+		}
 	}
 	o.containerRuntimeEndpoint = strings.TrimSpace(o.containerRuntimeEndpoint)
 	if o.containerRuntimeEndpoint == "" {
@@ -170,6 +200,9 @@ func (o *Options) BuildReconcilerConfig() (*ReconcilerConfig, error) {
 			AllowSrcPrefix: o.allowSrcPrefix,
 			AllowDstPrefix: o.allowDstPrefix,
 		},
+		TCXRuntimeClasses: o.tcxRuntimeClasses,
+		BPFPinPath:        o.bpfPinPath,
+		TCXFlowTableSize:  o.tcxFlowTableSize,
 	}, nil
 }
 
@@ -177,6 +210,8 @@ func (o *Options) BuildReconcilerConfig() (*ReconcilerConfig, error) {
 func NewOptions() *Options {
 	return &Options{
 		containerRuntime: controllers.Cri,
+		bpfPinPath:       defaultBPFPinPath,
+		tcxFlowTableSize: defaultTCXFlowTableSize,
 	}
 }
 

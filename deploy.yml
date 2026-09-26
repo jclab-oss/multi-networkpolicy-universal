@@ -123,10 +123,13 @@ spec:
             cpu: 100m
             memory: 80Mi
         securityContext:
+          appArmorProfile:
+            type: Unconfined
           capabilities:
             add:
             - SYS_ADMIN
             - NET_ADMIN
+            - SYS_PTRACE
         volumeMounts:
         - mountPath: /host
           name: host

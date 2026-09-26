@@ -1,0 +1,13 @@
+# e2e DaemonSet for the Kata Containers suite (e2e/kata).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../e2e
+patches:
+  - path: daemonset-e2e-kata.yaml
+    target:
+      group: apps
+      version: v1
+      kind: DaemonSet
+      name: multi-networkpolicy-ds-amd64
+      namespace: kube-system

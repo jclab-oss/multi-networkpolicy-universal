@@ -11,10 +11,10 @@ GOVULNCHECK_VERSION ?= v1.1.4
 GOVULNCHECK ?= $(shell go env GOPATH)/bin/govulncheck
 TEST_PROFILE ?= profile.cov
 TEST_ALL_PKGS ?= ./...
-TEST_UNPRIVILEGED_PKGS ?= ./pkg/controller ./pkg/controllers ./pkg/utils
+TEST_UNPRIVILEGED_PKGS ?= ./pkg/controller ./pkg/controllers ./pkg/utils ./pkg/tcx
 TEST_NFTABLES_PKGS ?= ./pkg/server
 
-.PHONY: all build test lint vet govulncheck fmt fmt-fix clean e2e image manifests verify-manifests help
+.PHONY: all build test lint vet govulncheck fmt fmt-fix clean e2e e2e-kata image manifests verify-manifests bpf verify-bpf help
 
 all: build
 
@@ -101,6 +101,19 @@ image:
 ## e2e: Run e2e tests (requires kind cluster)
 e2e:
 	cd e2e && ./run_all_tests.sh
+
+## e2e-kata: Run the Kata Containers e2e suite (requires /dev/kvm; creates its own kind cluster)
+e2e-kata:
+	cd e2e && ./kata/setup_cluster.sh && ./kata/run_tests.sh
+
+## bpf: Regenerate the TCX policy program and its Go bindings (requires clang)
+bpf:
+	cd pkg/tcx && go generate ./...
+
+## verify-bpf: Verify the committed BPF object matches bpf/policy.c
+verify-bpf: bpf
+	@git diff --exit-code -- pkg/tcx/policy_bpfel.go pkg/tcx/policy_bpfel.o || \
+		{ echo "pkg/tcx is stale; run make bpf with the clang version in the verify-bpf CI job" >&2; exit 1; }
 
 ## manifests: Regenerate deploy.yml and e2e install manifests
 manifests:

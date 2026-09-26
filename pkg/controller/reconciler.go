@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	netdefv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	netdefutils "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/utils"
 	"github.com/telekom/multi-networkpolicy-nftables/pkg/controllers"
+	"github.com/telekom/multi-networkpolicy-nftables/pkg/tcx"
 	multiutils "github.com/telekom/multi-networkpolicy-nftables/pkg/utils"
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
@@ -28,7 +31,18 @@ import (
 
 var _ controllers.PolicyDeps = (*NodeReconciler)(nil)
 
-// NodeReconciler reconciles the local node's pods into nftables rules.
+// SandboxDatapath enforces the policies of pods whose traffic bypasses the
+// netfilter hooks of their network namespace (see package tcx).
+type SandboxDatapath interface {
+	Apply(netnsPath string, podUID types.UID, endpoints []tcx.EndpointPolicy) error
+	Prune(keep func(tcx.Endpoint) bool) error
+	RemoveAll() error
+}
+
+var _ SandboxDatapath = (*tcx.Datapath)(nil)
+
+// NodeReconciler reconciles the local node's pods into nftables rules, or into
+// TCX programs for pods of the runtime classes in TCXRuntimeClasses.
 type NodeReconciler struct {
 	NodeName       string
 	Client         client.Client
@@ -42,12 +56,26 @@ type NodeReconciler struct {
 	ContainerRuntimeEndpoint string
 	criMu                    sync.Mutex
 
+	// TCX enforces the pods whose spec.runtimeClassName is listed in
+	// TCXRuntimeClasses, such as Kata Containers pods. Nil disables it.
+	TCX               SandboxDatapath
+	TCXRuntimeClasses []string
+
 	ApplyRulesForPodFunc func(context.Context, controllers.PolicyDeps, controllers.CommonRuleConfig, controllers.PolicyMap, *corev1.Pod, *controllers.PodInfo, string) error
 }
 
 // CleanupOnShutdown removes policy rules for pods on the local node.
 func CleanupOnShutdown(ctx context.Context, r *NodeReconciler, cl client.Client) error {
-	return cleanupAllPods(ctx, r, cl)
+	var tcxErr error
+	if r.TCX != nil {
+		// The pinned programs do not depend on the pods' state; remove them
+		// first so no failure below can leave them behind.
+		klog.Info("cleanup: removing TCX programs")
+		if tcxErr = r.TCX.RemoveAll(); tcxErr != nil {
+			tcxErr = fmt.Errorf("remove TCX programs: %w", tcxErr)
+		}
+	}
+	return errors.Join(tcxErr, cleanupAllPods(ctx, r, cl))
 }
 
 // SetupWithManager wires node, pod, policy, namespace, and NAD watches.
@@ -86,17 +114,26 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	deps := r.policyDeps()
 	retryNeeded := false
 	var retryErrs []error
+	// TCX endpoints to keep: pod UID -> interfaces, nil keeps all of the
+	// pod's interfaces. Anything else pinned by this node is pruned.
+	tcxKeep := map[types.UID]map[string]bool{}
 	for i := range podList.Items {
 		pod := &podList.Items[i]
 		if !controllers.IsMultiNetworkpolicyTarget(pod) {
 			continue
 		}
+		useTCX := r.usesTCX(pod)
 
 		podInfo, err := deps.GetPodInfo(ctx, pod)
 		if err != nil {
 			klog.Errorf("failed to get pod info for %s/%s: %v", pod.Namespace, pod.Name, err)
 			retryNeeded = true
 			retryErrs = append(retryErrs, fmt.Errorf("get pod info for %s/%s: %w", pod.Namespace, pod.Name, err))
+			if useTCX {
+				// Keep enforcing the last applied policy until the pod
+				// can be inspected again.
+				tcxKeep[pod.UID] = nil
+			}
 			continue
 		}
 		if podInfo == nil || len(podInfo.Interfaces) == 0 {
@@ -104,10 +141,30 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			continue
 		}
 
+		if useTCX {
+			keep, err := r.applyTCX(ctx, deps, policyMap, pod, podInfo)
+			tcxKeep[pod.UID] = keep
+			if err != nil {
+				klog.Errorf("failed to apply TCX policy for %s/%s: %v", pod.Namespace, pod.Name, err)
+				retryErrs = append(retryErrs, fmt.Errorf("apply TCX policy for %s/%s: %w", pod.Namespace, pod.Name, err))
+			}
+			continue
+		}
+
 		if err := r.applyRulesForPod(ctx, deps, r.CommonCfg, policyMap, pod, podInfo, r.HostPrefix); err != nil {
 			klog.Errorf("failed to apply rules for %s/%s: %v", pod.Namespace, pod.Name, err)
 			retryNeeded = true
 			retryErrs = append(retryErrs, fmt.Errorf("apply rules for %s/%s: %w", pod.Namespace, pod.Name, err))
+		}
+	}
+
+	if r.TCX != nil {
+		if err := r.TCX.Prune(func(ep tcx.Endpoint) bool {
+			ifaces, ok := tcxKeep[ep.PodUID]
+			return ok && (ifaces == nil || ifaces[ep.Interface])
+		}); err != nil {
+			klog.Errorf("failed to prune TCX policies: %v", err)
+			retryErrs = append(retryErrs, fmt.Errorf("prune TCX policies: %w", err))
 		}
 	}
 
@@ -132,6 +189,36 @@ func (r *NodeReconciler) applyRulesForPod(ctx context.Context, deps controllers.
 		return r.ApplyRulesForPodFunc(ctx, deps, cfg, policyMap, pod, podInfo, hostPrefix)
 	}
 	return applyRulesForPod(ctx, deps, cfg, policyMap, pod, podInfo, hostPrefix)
+}
+
+func (r *NodeReconciler) usesTCX(pod *corev1.Pod) bool {
+	if r.TCX == nil || pod.Spec.RuntimeClassName == nil {
+		return false
+	}
+	return slices.Contains(r.TCXRuntimeClasses, *pod.Spec.RuntimeClassName)
+}
+
+// applyTCX compiles and applies the policies of a pod enforced by the TCX
+// datapath. It returns the interfaces whose programs must be kept, nil for
+// all of them.
+//
+// A policy that cannot be compiled (a named port, too many rules) fails
+// closed: the directions it isolates accept no new connections until it is
+// fixed. When applying fails, the policy applied last stays in place.
+func (r *NodeReconciler) applyTCX(ctx context.Context, deps controllers.PolicyDeps, policyMap controllers.PolicyMap, pod *corev1.Pod, podInfo *controllers.PodInfo) (map[string]bool, error) {
+	endpoints, compileErr := tcx.Compile(ctx, deps, r.CommonCfg, policyMap, pod, podInfo)
+	if compileErr != nil {
+		compileErr = fmt.Errorf("compile (denying new connections in the isolated directions): %w", compileErr)
+		endpoints = tcx.Isolation(r.CommonCfg, policyMap, pod, podInfo)
+	}
+	if err := r.TCX.Apply(filepath.Join(r.HostPrefix, podInfo.NetNSPath), pod.UID, endpoints); err != nil {
+		return nil, errors.Join(compileErr, err)
+	}
+	keep := make(map[string]bool, len(endpoints))
+	for _, ep := range endpoints {
+		keep[ep.Interface] = true
+	}
+	return keep, compileErr
 }
 
 // ListPods returns pods matching the provided label selector.

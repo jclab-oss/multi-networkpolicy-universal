@@ -26,3 +26,6 @@ testbin/
 
 # Agent artifacts
 .sisyphus/
+
+# e2e outputs
+e2e/artifacts/

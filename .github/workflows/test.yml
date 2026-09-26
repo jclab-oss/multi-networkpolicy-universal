@@ -62,6 +62,11 @@ jobs:
     - name: Load kernel modules
       run: sudo modprobe nft_ct
 
+    # The TCX datapath tests in pkg/tcx run with the privileged suite below;
+    # they need Linux 6.6+ and bpffs, which the runner provides.
+    - name: Show kernel
+      run: uname -r && mount -t bpf
+
     - name: Test unprivileged packages
       run: make test-unprivileged
 
@@ -75,6 +80,26 @@ jobs:
         path-to-profile: profile.cov
         flag-name: "Go-${{ matrix.go-version }}-${{ matrix.os }}"
         parallel: true
+
+  verify-bpf:
+    # The committed BPF object must match bpf/policy.c. Ubuntu 24.04's clang
+    # (18.1.3) produces it byte for byte; see "BPF program" in README.md.
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+        cache: true
+
+    - name: Install clang
+      run: sudo apt-get install -y clang llvm
+
+    - name: Verify the BPF object is up to date
+      run: make verify-bpf
 
   # notifies that all test jobs are finished.
   finish:

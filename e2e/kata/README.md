@@ -7,6 +7,8 @@ Tests the TCX datapath with real Kata Containers VMs on a kind cluster:
 | `tcfilter-ingress` | `kata-qemu` | Go | `tcfilter` (IPv4 and IPv6, mixed with a runc pod, daemon stop and kill) |
 | `runtime-rs-egress` | `kata-qemu-runtime-rs` | Rust | `tcfilter` (egress with ports) |
 | `macvtap-ingress` | `kata-qemu-macvtap` | Go | `macvtap` (IPv4) |
+| `default-network` | `kata-qemu` | Go | `tcfilter`, net-attach-def as the primary network (`eth0`) |
+| `default-network-macvtap` | `kata-qemu-macvtap` | Go | `macvtap`, net-attach-def as the primary network (`eth0`) |
 
 ```bash
 cd e2e

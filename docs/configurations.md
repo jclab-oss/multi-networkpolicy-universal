@@ -62,3 +62,8 @@ applies to the primary interface.
 As with secondary networks, the plugin type of the net-attach-def must be listed in
 `--network-plugins` (default: `macvlan`), so a pod whose default network uses a
 plugin outside that list stays unfiltered.
+
+This applies to pods enforced by the TCX datapath as well (see
+[Kata Containers and other sandboxed runtimes](kata.md)): for a Kata pod on a
+default-network net-attach-def, the programs are attached to `eth0` (or to its
+macvtap device).

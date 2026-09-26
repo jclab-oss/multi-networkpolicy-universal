@@ -111,7 +111,9 @@ Everything the nftables backend supports: `podSelector`, `namespaceSelector`,
 `ipBlock` with `except`, TCP/UDP/SCTP ports and `endPort`, protocol-only ports,
 IPv4 and IPv6, `--accept-icmp`, `--accept-icmpv6` (IPv6 neighbor discovery is
 always accepted), `--allow-src-prefix` and `--allow-dst-prefix`. Named ports
-are rejected, as by the nftables backend.
+are rejected, as by the nftables backend. Pods whose primary network is a
+net-attach-def (Multus `v1.multus-cni.io/default-network` annotation) are
+policed on `eth0`, see [Configurations](configurations.md).
 
 The TCX datapath follows the MultiNetworkPolicy specification in these
 points:
@@ -167,6 +169,9 @@ Linux 6.8 during development:
 | `kata-qemu` | Go (`containerd-shim-kata-v2`) | `tcfilter`, IPv4 and IPv6 |
 | `kata-qemu-runtime-rs` | Rust (runtime-rs) | `tcfilter` |
 | `kata-qemu-macvtap` | Go | `macvtap` on a macvlan net-attach-def, IPv4 |
+
+Each model is tested with the policed net-attach-def as a secondary network
+(`net1`) and as the primary network (`eth0`, Multus default-network).
 
 The datapath itself is also tested without Kata, against a network namespace
 setup that reproduces Kata's tc redirect filters (`pkg/tcx`, privileged tests).

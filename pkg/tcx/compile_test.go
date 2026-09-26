@@ -518,3 +518,29 @@ func TestIsolationDeniesIsolatedDirections(t *testing.T) {
 		t.Errorf("net2 is not on the policy's network")
 	}
 }
+
+func TestCompileDefaultNetworkInterface(t *testing.T) {
+	// A pod whose primary network is a net-attach-def (Multus
+	// default-network annotation) is policed on eth0, and peers are resolved
+	// through their eth0 as well.
+	f := &fakeCluster{}
+	server, info := f.addPod("ns1", "server", map[string]string{"name": "server"}, "default/defnet=2.2.43.1")
+	info.Interfaces[0].InterfaceName = "eth0"
+	_, clientInfo := f.addPod("ns1", "client", map[string]string{"name": "client"}, "default/defnet=2.2.43.11")
+	clientInfo.Interfaces[0].InterfaceName = "eth0"
+
+	pm := policyMap(policy("p", "default/defnet", multiv1beta1.MultiNetworkPolicySpec{
+		PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"name": "server"}},
+		Ingress: []multiv1beta1.MultiNetworkPolicyIngressRule{{
+			From: []multiv1beta1.MultiNetworkPolicyPeer{selectPods(map[string]string{"name": "client"})},
+		}},
+	}))
+	eps := mustCompile(t, f, controllers.CommonRuleConfig{}, pm, server, info)
+	if len(eps) != 1 || eps[0].Interface != "eth0" {
+		t.Fatalf("endpoints = %+v, want eth0", eps)
+	}
+	in := eps[0].Directions[Ingress]
+	if !in.Allows(addr("2.2.43.11"), protoTCP, 5555, true) || in.Allows(addr("2.2.43.12"), protoTCP, 5555, true) {
+		t.Errorf("ingress on eth0 must allow the client only")
+	}
+}

@@ -1,0 +1,157 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: multi-networkpolicy
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: multi-networkpolicy
+rules:
+- apiGroups:
+  - k8s.cni.cncf.io
+  resources:
+  - multi-networkpolicies
+  - network-attachment-definitions
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - ""
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: multi-networkpolicy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: multi-networkpolicy
+subjects:
+- kind: ServiceAccount
+  name: multi-networkpolicy
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    app: multi-networkpolicy
+    name: multi-networkpolicy
+    tier: node
+  name: multi-networkpolicy-ds-amd64
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: multi-networkpolicy
+  template:
+    metadata:
+      labels:
+        app: multi-networkpolicy
+        name: multi-networkpolicy
+        tier: node
+    spec:
+      containers:
+      - args:
+        - --host-prefix=/host
+        - --container-runtime-endpoint=/run/containerd/containerd.sock
+        - --health-port=8081
+        - --health-bind-address=127.0.0.1
+        - --tcx-runtime-classes=kata,kata-qemu,kata-clh,kata-fc,kata-dragonball,kata-qemu-runtime-rs,kata-clh-runtime-rs
+        command:
+        - /usr/bin/multi-networkpolicy-nftables
+        image: ghcr.io/telekom/multi-networkpolicy-nftables
+        imagePullPolicy: Always
+        livenessProbe:
+          httpGet:
+            host: 127.0.0.1
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        name: multi-networkpolicy
+        ports:
+        - containerPort: 8081
+          hostPort: 8081
+          name: health
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            host: 127.0.0.1
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 100m
+            memory: 150Mi
+          requests:
+            cpu: 100m
+            memory: 80Mi
+        securityContext:
+          appArmorProfile:
+            type: Unconfined
+          capabilities:
+            add:
+            - SYS_ADMIN
+            - NET_ADMIN
+            - SYS_PTRACE
+        volumeMounts:
+        - mountPath: /host
+          name: host
+          readOnly: true
+        - mountPath: /sys/fs/bpf
+          name: bpffs
+      hostNetwork: true
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      serviceAccountName: multi-networkpolicy
+      terminationGracePeriodSeconds: 60
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      volumes:
+      - hostPath:
+          path: /
+        name: host
+      - hostPath:
+          path: /sys/fs/bpf
+          type: Directory
+        name: bpffs
+  updateStrategy:
+    type: RollingUpdate

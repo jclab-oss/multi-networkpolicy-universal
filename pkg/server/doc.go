@@ -15,6 +15,8 @@
 // Package server is the package that contains server functions.
 package server
 
+import "github.com/telekom/multi-networkpolicy-nftables/pkg/controllers"
+
 const (
 	// FilterTableName is the daemon-owned nftables table name for filter rules.
 	// A daemon-specific prefix prevents collisions with other programs sharing
@@ -51,7 +53,7 @@ const (
 	sourceAddressSuffix      = "saddrs"
 	podInterfacesName        = "pod_interfaces"
 	// PolicyNetworkAnnotation declares which secondary networks a policy targets.
-	PolicyNetworkAnnotation = "k8s.v1.cni.cncf.io/policy-for"
+	PolicyNetworkAnnotation = controllers.PolicyNetworkAnnotation
 
 	// Marks for rules
 	peerRuleMark  = uint32(0x20000)

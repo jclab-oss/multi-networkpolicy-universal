@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: multi-networkpolicy-ds-amd64
+  namespace: kube-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: multi-networkpolicy
+          args:
+            - --host-prefix=/host
+            - --container-runtime-endpoint=/run/containerd/containerd.sock
+            - --health-port=8081
+            - --health-bind-address=127.0.0.1
+            - --tcx-runtime-classes=kata,kata-qemu,kata-clh,kata-fc,kata-dragonball,kata-qemu-runtime-rs,kata-clh-runtime-rs
+          volumeMounts:
+            - name: host
+              mountPath: /host
+              readOnly: true
+            # The TCX datapath pins its programs and flow tables here so
+            # they keep enforcing while the daemon restarts.
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+      volumes:
+        - name: host
+          hostPath:
+            path: /
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory

@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"slices"
+
 	"github.com/telekom/multi-networkpolicy-nftables/pkg/controllers"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -11,8 +13,9 @@ import (
 const policyNetworkAnnotation = "k8s.v1.cni.cncf.io/policy-for"
 
 // PodPredicate filters pod events: allows Create/Delete, allows Update only if
-// pod phase, labels, container IDs, or network-related annotations changed.
-func PodPredicate() predicate.Predicate {
+// pod phase, labels, container IDs, network-related annotations or one of
+// annotationKeys (such as the backend annotation) changed.
+func PodPredicate(annotationKeys ...string) predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(event.CreateEvent) bool { return true },
 		DeleteFunc: func(event.DeleteEvent) bool { return true },
@@ -35,7 +38,7 @@ func PodPredicate() predicate.Predicate {
 			if containerStatusesChanged(oldPod.Status.ContainerStatuses, newPod.Status.ContainerStatuses) {
 				return true
 			}
-			return networkAnnotationsChanged(oldPod.Annotations, newPod.Annotations)
+			return networkAnnotationsChanged(oldPod.Annotations, newPod.Annotations, annotationKeys...)
 		},
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
@@ -107,8 +110,8 @@ var networkAnnotationKeys = []string{
 	controllers.DefaultNetworkAnnotation,
 }
 
-func networkAnnotationsChanged(oldAnnotations, newAnnotations map[string]string) bool {
-	for _, key := range networkAnnotationKeys {
+func networkAnnotationsChanged(oldAnnotations, newAnnotations map[string]string, extraKeys ...string) bool {
+	for _, key := range slices.Concat(networkAnnotationKeys, extraKeys) {
 		if oldAnnotations[key] != newAnnotations[key] {
 			return true
 		}

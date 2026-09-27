@@ -29,13 +29,13 @@ multi-networkpolicy-nftables runs as a DaemonSet on each Kubernetes node. It wat
 - **Controllers** (`pkg/controllers/`): Watch Kubernetes resources (Pods, Namespaces, MultiNetworkPolicies, NetworkAttachmentDefinitions) using client-go informers.
 - **Server** (`pkg/server/`): Core orchestration and sync loop that coordinates controllers and triggers rule generation.
 - **Rule Generator** (`pkg/server/netfilterrules.go`): Translates MultiNetworkPolicy specs into nftables rule sets using the google/nftables library.
-- **TCX Datapath** (`pkg/tcx/`, `bpf/policy.c`): For pods of the RuntimeClasses in `--tcx-runtime-classes`, compiles the policies into BPF tables and attaches `bpf/policy.c` to the TCX ingress/egress hooks of the pod's interfaces.
+- **TCX Datapath** (`pkg/tcx/`, `bpf/policy.c`): For pods of the RuntimeClasses in `--tcx-runtime-classes`, or annotated `multinetworkpolicy.io/backend: tcx`, compiles the policies into BPF tables and attaches `bpf/policy.c` to the TCX ingress/egress hooks of the pod's interfaces.
 
 ### How It Works
 
 1. The daemon watches for changes to MultiNetworkPolicy resources and related objects (Pods, Namespaces, NetworkAttachmentDefinitions).
 2. On each sync cycle, it determines which pods are affected by which policies.
-3. For each affected pod, it enters the pod's network namespace and applies nftables rules that enforce the specified ingress/egress policies. Pods of a sandboxed runtime listed in `--tcx-runtime-classes` get TCX programs instead.
+3. For each affected pod, it enters the pod's network namespace and applies nftables rules that enforce the specified ingress/egress policies. Pods of a sandboxed runtime listed in `--tcx-runtime-classes`, or annotated `multinetworkpolicy.io/backend: tcx`, get TCX programs instead.
 4. When policies are removed, the corresponding nftables rules are cleaned up automatically.
 
 ![Multi NetworkPolicy Overview](docs/images/multi-networkpolicy-overview.png)
@@ -88,6 +88,9 @@ macvtap:   peer ◄─► tapN_kata [TCX ingress/egress: policy] ◄─► VM
   programs keep enforcing while the daemon restarts after a crash.
 * Runc pods on the same node keep using nftables; a policy can select pods of
   both kinds.
+* The pod annotation `multinetworkpolicy.io/backend: tcx` or `nftables`
+  overrides the choice made from the RuntimeClass, for any pod (the key is
+  configurable with `--backend-annotation`).
 
 Deploy with the Kata overlay, which mounts bpffs and enables the flag for the
 kata-deploy RuntimeClasses (adjust them and the CRI socket to your cluster):

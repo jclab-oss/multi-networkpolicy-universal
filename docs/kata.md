@@ -67,17 +67,39 @@ macvtap:   peer ──► (lower device) ──► tapN_kata [TCX ingress] ─�
 | Applying a pod's policy fails (kernel error) | The previously applied policy stays in place; the error is logged and retried |
 | Pod sandbox recreated (new network namespace) | Stale pins are detected and the programs attached to the new interfaces |
 | Pod deleted | Its programs are removed on the next reconcile |
+| Backend annotation changed | The previous backend's programs or nftables rules are removed and the new one applied |
+| Pod annotated `tcx`, TCX datapath unavailable | The pod is not policed; the error is logged and retried |
 
 ## Enabling it
 
-1. List the RuntimeClasses whose pods bypass netfilter:
+1. Choose the pods the TCX datapath polices, by RuntimeClass, by
+   annotation, or both:
 
    ```
    --tcx-runtime-classes=kata,kata-qemu,kata-clh
    ```
 
-   Pods with `spec.runtimeClassName` in the list use the TCX datapath, all
-   other pods nftables. Without the flag the TCX datapath is off.
+   ```yaml
+   metadata:
+     annotations:
+       multinetworkpolicy.io/backend: tcx   # or nftables
+   ```
+
+   A pod's backend is, in this order:
+
+   1. the one its backend annotation names (`tcx` or `nftables`, case
+      insensitive); the key is set with `--backend-annotation`;
+   2. `tcx` if its `spec.runtimeClassName` is listed in
+      `--tcx-runtime-classes`;
+   3. `nftables`.
+
+   The annotation works in both directions: `nftables` keeps a pod of a
+   listed RuntimeClass on nftables (for example a runtime class whose pods
+   do reach netfilter), `tcx` moves any pod to the TCX datapath, a runc pod
+   included, since the TCX hooks see its traffic as well. It can be changed on
+   a running pod; the daemon then removes the pod's programs or nftables rules
+   of the previous backend. A value other than `tcx` or `nftables` is logged
+   and ignored.
 
 2. Give the daemon bpffs. [`deploy-kata.yml`](../deploy-kata.yml) (overlay
    [`config/manager/overlays/kata`](../config/manager/overlays/kata)) mounts
@@ -88,9 +110,17 @@ macvtap:   peer ──► (lower device) ──► tapN_kata [TCX ingress] ─�
    kubectl create -f deploy-kata.yml
    ```
 
+   With `--tcx-runtime-classes` set, the daemon does not start without a
+   working TCX datapath. With only the annotation (the default
+   `--backend-annotation`), a daemon without bpffs, such as the one from
+   `deploy.yml`, starts without the datapath and reports every pod annotated
+   `tcx` as not policed; it does not fall back to nftables, which cannot
+   police a Kata pod.
+
 | Flag | Default | Description |
 |---|---|---|
 | `--tcx-runtime-classes` | *(empty)* | RuntimeClass names policed through TCX |
+| `--backend-annotation` | `multinetworkpolicy.io/backend` | Pod annotation that selects the backend, overriding `--tcx-runtime-classes`; empty disables it |
 | `--bpf-pin-path` | `/sys/fs/bpf/multi-networkpolicy` | bpffs directory for the pinned programs and flow tables |
 | `--tcx-flow-table-size` | `65536` | Connections tracked across all TCX-policed pods of the node |
 

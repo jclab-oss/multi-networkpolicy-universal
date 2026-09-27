@@ -337,3 +337,34 @@ func ptrIntOrString(p int) *intstr.IntOrString {
 	v := intstr.FromInt(p)
 	return &v
 }
+
+// TestDatapathPlainPod polices a pod whose traffic terminates in its own
+// network namespace, like a runc pod whose backend annotation selects TCX:
+//
+//	client netns c0 10.9.0.1 <-veth-> pod netns eth0 10.9.0.2
+func TestDatapathPlainPod(t *testing.T) {
+	d := newTestDatapath(t)
+	requireTools(t, "ip")
+	id := fmt.Sprintf("%d", os.Getpid()%100000)
+	client, pod := "mnpc"+id+"r", "mnpp"+id+"r"
+	for _, n := range []string{client, pod} {
+		sh(t, "ip", "netns", "add", n)
+		t.Cleanup(func() { _ = exec.Command("ip", "netns", "del", n).Run() })
+	}
+	sh(t, "ip", "link", "add", "c0", "netns", client, "type", "veth", "peer", "name", "eth0", "netns", pod)
+	sh(t, "ip", "-n", client, "addr", "add", "10.9.0.1/24", "dev", "c0")
+	sh(t, "ip", "-n", pod, "addr", "add", "10.9.0.2/24", "dev", "eth0")
+	for _, l := range [][2]string{{client, "c0"}, {client, "lo"}, {pod, "eth0"}, {pod, "lo"}} {
+		sh(t, "ip", "-n", l[0], "link", "set", l[1], "up")
+	}
+	serve(t, pod, "10.9.0.2:5555")
+	serve(t, pod, "10.9.0.2:5556")
+	serve(t, client, "10.9.0.1:7777")
+
+	if err := d.Apply("/run/netns/"+pod, "runc-pod-uid", kataPolicies(t, true)); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	expectConnect(t, client, "10.9.0.2:5555", "allowed port")
+	expectBlocked(t, client, "10.9.0.2:5556", "port not in policy")
+	expectBlocked(t, pod, "10.9.0.1:7777", "egress denied")
+}

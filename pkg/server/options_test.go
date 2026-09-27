@@ -178,3 +178,39 @@ func TestAddFlagsAcceptsDeprecatedIptablesStateFlagNoop(t *testing.T) {
 		t.Fatalf("BuildReconcilerConfig() error = %v", err)
 	}
 }
+
+func TestOptionsValidateBackendAnnotation(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		key   string
+		valid bool
+	}{
+		{key: "multinetworkpolicy.io/backend", valid: true},
+		{key: "backend", valid: true},
+		{key: "", valid: true}, // disabled
+		{key: "example.com/not a key"},
+		{key: "a/b/c"},
+	} {
+		opts := NewOptions()
+		opts.containerRuntimeEndpoint = "/run/containerd/containerd.sock"
+		opts.backendAnnotation = tt.key
+		if err := opts.Validate(); (err == nil) != tt.valid {
+			t.Errorf("Validate() with backend-annotation %q: error = %v, want valid = %v", tt.key, err, tt.valid)
+		}
+	}
+}
+
+func TestNewOptionsDefaultsBackendAnnotation(t *testing.T) {
+	t.Parallel()
+
+	opts := NewOptions()
+	opts.containerRuntimeEndpoint = "/run/containerd/containerd.sock"
+	cfg, err := opts.BuildReconcilerConfig()
+	if err != nil {
+		t.Fatalf("BuildReconcilerConfig() error = %v", err)
+	}
+	if cfg.BackendAnnotation != "multinetworkpolicy.io/backend" {
+		t.Errorf("BackendAnnotation = %q, want the default key", cfg.BackendAnnotation)
+	}
+}

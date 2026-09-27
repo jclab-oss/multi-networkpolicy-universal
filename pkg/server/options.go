@@ -27,6 +27,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/telekom/multi-networkpolicy-nftables/pkg/controllers"
 
+	"k8s.io/apimachinery/pkg/util/validation"
 	nodeutil "k8s.io/component-helpers/node/util"
 	"k8s.io/klog/v2"
 )
@@ -63,6 +64,7 @@ type Options struct {
 	tcxRuntimeClasses []string
 	bpfPinPath        string
 	tcxFlowTableSize  uint32
+	backendAnnotation string
 
 	// updated by command line parsing
 	allowSrcPrefix []string
@@ -84,6 +86,9 @@ type ReconcilerConfig struct {
 	TCXRuntimeClasses []string
 	BPFPinPath        string
 	TCXFlowTableSize  uint32
+	// BackendAnnotation is the pod annotation that selects a pod's backend;
+	// empty disables it.
+	BackendAnnotation string
 }
 
 // AddFlags adds command line flags into command
@@ -111,6 +116,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringSliceVar(&o.tcxRuntimeClasses, "tcx-runtime-classes", nil, "RuntimeClass names whose pods are policed by eBPF programs on the TCX hooks of their interfaces instead of nftables, for sandboxed runtimes whose traffic bypasses netfilter such as Kata Containers (e.g. \"kata,kata-qemu\"). Requires Linux 6.6 or later and bpffs.")
 	fs.StringVar(&o.bpfPinPath, "bpf-pin-path", defaultBPFPinPath, "bpffs directory where the TCX datapath pins its programs and flow tables.")
 	fs.Uint32Var(&o.tcxFlowTableSize, "tcx-flow-table-size", defaultTCXFlowTableSize, "Number of connections the TCX datapath tracks across all pods of the node.")
+	fs.StringVar(&o.backendAnnotation, "backend-annotation", controllers.DefaultBackendAnnotation, "Pod annotation that selects the pod's enforcement backend, \"tcx\" or \"nftables\", overriding --tcx-runtime-classes. Empty disables it.")
 	fs.AddGoFlagSet(flag.CommandLine)
 }
 
@@ -153,7 +159,13 @@ func (o *Options) Validate() error {
 			return fmt.Errorf("tcx-runtime-classes must not contain empty names")
 		}
 	}
-	if len(o.tcxRuntimeClasses) > 0 {
+	o.backendAnnotation = strings.TrimSpace(o.backendAnnotation)
+	if o.backendAnnotation != "" {
+		if errs := validation.IsQualifiedName(o.backendAnnotation); len(errs) > 0 {
+			return fmt.Errorf("backend-annotation %q is not a valid annotation key: %s", o.backendAnnotation, strings.Join(errs, "; "))
+		}
+	}
+	if len(o.tcxRuntimeClasses) > 0 || o.backendAnnotation != "" {
 		if !filepath.IsAbs(o.bpfPinPath) {
 			return fmt.Errorf("bpf-pin-path must be an absolute path")
 		}
@@ -203,15 +215,17 @@ func (o *Options) BuildReconcilerConfig() (*ReconcilerConfig, error) {
 		TCXRuntimeClasses: o.tcxRuntimeClasses,
 		BPFPinPath:        o.bpfPinPath,
 		TCXFlowTableSize:  o.tcxFlowTableSize,
+		BackendAnnotation: o.backendAnnotation,
 	}, nil
 }
 
 // NewOptions initializes Options
 func NewOptions() *Options {
 	return &Options{
-		containerRuntime: controllers.Cri,
-		bpfPinPath:       defaultBPFPinPath,
-		tcxFlowTableSize: defaultTCXFlowTableSize,
+		containerRuntime:  controllers.Cri,
+		bpfPinPath:        defaultBPFPinPath,
+		tcxFlowTableSize:  defaultTCXFlowTableSize,
+		backendAnnotation: controllers.DefaultBackendAnnotation,
 	}
 }
 

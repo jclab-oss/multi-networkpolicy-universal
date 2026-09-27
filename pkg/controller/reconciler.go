@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,9 +58,22 @@ type NodeReconciler struct {
 	criMu                    sync.Mutex
 
 	// TCX enforces the pods whose spec.runtimeClassName is listed in
-	// TCXRuntimeClasses, such as Kata Containers pods. Nil disables it.
+	// TCXRuntimeClasses, such as Kata Containers pods, and the pods whose
+	// BackendAnnotation says "tcx". Nil disables it; TCXUnavailable then
+	// says why, for pods that ask for it.
 	TCX               SandboxDatapath
 	TCXRuntimeClasses []string
+	TCXUnavailable    error
+	// BackendAnnotation is the pod annotation that selects the backend
+	// ("tcx" or "nftables") regardless of the RuntimeClass. Empty disables
+	// it.
+	BackendAnnotation string
+
+	// FlushRulesForPodFunc replaces flushRulesForPod in tests.
+	FlushRulesForPodFunc func(podNamespace, podName, netnsPath, hostPrefix string) error
+	// nftFlushed records the pods whose nftables rules were removed when
+	// they moved to the TCX datapath, so it happens once per pod and run.
+	nftFlushed map[types.UID]bool
 
 	ApplyRulesForPodFunc func(context.Context, controllers.PolicyDeps, controllers.CommonRuleConfig, controllers.PolicyMap, *corev1.Pod, *controllers.PodInfo, string) error
 }
@@ -84,7 +98,7 @@ func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&corev1.Node{}, builder.WithPredicates(NodePredicate(r.NodeName))).
 		Watches(&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(mapPodToNode(r.NodeName)),
-			builder.WithPredicates(PodPredicate())).
+			builder.WithPredicates(PodPredicate(r.podAnnotationKeys()...))).
 		Watches(&multiv1beta1.MultiNetworkPolicy{},
 			handler.EnqueueRequestsFromMapFunc(mapPolicyToNode(r.NodeName)),
 			builder.WithPredicates(PolicyPredicate())).
@@ -122,7 +136,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		if !controllers.IsMultiNetworkpolicyTarget(pod) {
 			continue
 		}
-		useTCX := r.usesTCX(pod)
+		useTCX := r.backend(pod) == controllers.BackendTCX
 
 		podInfo, err := deps.GetPodInfo(ctx, pod)
 		if err != nil {
@@ -142,14 +156,22 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 
 		if useTCX {
+			if r.TCX == nil {
+				err := fmt.Errorf("pod requests the %s backend, but the TCX datapath is unavailable: %w", controllers.BackendTCX, r.TCXUnavailable)
+				klog.Errorf("pod %s/%s is not policed: %v", pod.Namespace, pod.Name, err)
+				retryErrs = append(retryErrs, fmt.Errorf("apply TCX policy for %s/%s: %w", pod.Namespace, pod.Name, err))
+				continue
+			}
 			keep, err := r.applyTCX(ctx, deps, policyMap, pod, podInfo)
 			tcxKeep[pod.UID] = keep
 			if err != nil {
 				klog.Errorf("failed to apply TCX policy for %s/%s: %v", pod.Namespace, pod.Name, err)
 				retryErrs = append(retryErrs, fmt.Errorf("apply TCX policy for %s/%s: %w", pod.Namespace, pod.Name, err))
 			}
+			r.flushNftablesOnce(pod, podInfo)
 			continue
 		}
+		delete(r.nftFlushed, pod.UID)
 
 		if err := r.applyRulesForPod(ctx, deps, r.CommonCfg, policyMap, pod, podInfo, r.HostPrefix); err != nil {
 			klog.Errorf("failed to apply rules for %s/%s: %v", pod.Namespace, pod.Name, err)
@@ -158,6 +180,11 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 	}
 
+	for uid := range r.nftFlushed {
+		if _, ok := tcxKeep[uid]; !ok {
+			delete(r.nftFlushed, uid)
+		}
+	}
 	if r.TCX != nil {
 		if err := r.TCX.Prune(func(ep tcx.Endpoint) bool {
 			ifaces, ok := tcxKeep[ep.PodUID]
@@ -191,11 +218,56 @@ func (r *NodeReconciler) applyRulesForPod(ctx context.Context, deps controllers.
 	return applyRulesForPod(ctx, deps, cfg, policyMap, pod, podInfo, hostPrefix)
 }
 
-func (r *NodeReconciler) usesTCX(pod *corev1.Pod) bool {
-	if r.TCX == nil || pod.Spec.RuntimeClassName == nil {
-		return false
+func (r *NodeReconciler) podAnnotationKeys() []string {
+	if r.BackendAnnotation == "" {
+		return nil
 	}
-	return slices.Contains(r.TCXRuntimeClasses, *pod.Spec.RuntimeClassName)
+	return []string{r.BackendAnnotation}
+}
+
+// backend returns the backend that enforces the pod's policies: the one its
+// backend annotation names, else TCX for the RuntimeClasses in
+// TCXRuntimeClasses, else nftables.
+func (r *NodeReconciler) backend(pod *corev1.Pod) string {
+	if r.BackendAnnotation != "" {
+		if value, ok := pod.Annotations[r.BackendAnnotation]; ok {
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case controllers.BackendTCX:
+				return controllers.BackendTCX
+			case controllers.BackendNftables:
+				return controllers.BackendNftables
+			default:
+				klog.Errorf("pod %s/%s: ignoring annotation %s=%q, want %q or %q", pod.Namespace, pod.Name, r.BackendAnnotation, value, controllers.BackendTCX, controllers.BackendNftables)
+			}
+		}
+	}
+	if r.TCX != nil && pod.Spec.RuntimeClassName != nil && slices.Contains(r.TCXRuntimeClasses, *pod.Spec.RuntimeClassName) {
+		return controllers.BackendTCX
+	}
+	return controllers.BackendNftables
+}
+
+// flushNftablesOnce removes the nftables rules of a pod that moved to the TCX
+// datapath, e.g. a runc pod whose backend annotation changed to "tcx":
+// otherwise they would keep enforcing the policy they were created with. The
+// Kata pods the nftables backend cannot police have no effective rules, but
+// may have leftover tables all the same.
+func (r *NodeReconciler) flushNftablesOnce(pod *corev1.Pod, podInfo *controllers.PodInfo) {
+	if r.nftFlushed[pod.UID] {
+		return
+	}
+	flush := flushRulesForPod
+	if r.FlushRulesForPodFunc != nil {
+		flush = r.FlushRulesForPodFunc
+	}
+	if err := flush(pod.Namespace, pod.Name, podInfo.NetNSPath, r.HostPrefix); err != nil {
+		klog.Errorf("failed to remove nftables rules of %s/%s, which uses the TCX datapath: %v", pod.Namespace, pod.Name, err)
+		return
+	}
+	if r.nftFlushed == nil {
+		r.nftFlushed = map[types.UID]bool{}
+	}
+	r.nftFlushed[pod.UID] = true
 }
 
 // applyTCX compiles and applies the policies of a pod enforced by the TCX

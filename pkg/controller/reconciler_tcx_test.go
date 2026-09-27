@@ -288,6 +288,151 @@ func TestReconcile_TCXFailsClosedWhenPolicyDoesNotCompile(t *testing.T) {
 	}
 }
 
+// annotatedPod returns a runc pod ("runc") or a pod of the RuntimeClass
+// "kata" ("kata") carrying the backend annotation key=value.
+func annotatedPod(t *testing.T, namespace, nodeName, kind, key, value string) *corev1.Pod {
+	t.Helper()
+	pod := newPod(namespace, kind, nodeName, map[string]string{"app": kind})
+	if kind == "kata" {
+		pod = newKataPod(t, namespace, nodeName)
+	}
+	pod.Annotations = map[string]string{key: value}
+	return pod
+}
+
+type backendRecorder struct {
+	nft     []string
+	flushed []string
+}
+
+func (b *backendRecorder) reconciler(t *testing.T, nodeName string, sandbox SandboxDatapath) *NodeReconciler {
+	t.Helper()
+	return &NodeReconciler{
+		NodeName:          nodeName,
+		Client:            testClient,
+		TCX:               sandbox,
+		TCXRuntimeClasses: []string{"kata"},
+		BackendAnnotation: controllers.DefaultBackendAnnotation,
+		PolicyDeps: &mockPolicyDeps{
+			getPodInfoFunc: func(p *corev1.Pod) (*controllers.PodInfo, error) { return podInfoWith(p, "net1"), nil },
+		},
+		ApplyRulesForPodFunc: func(_ context.Context, _ controllers.PolicyDeps, _ controllers.CommonRuleConfig, _ controllers.PolicyMap, p *corev1.Pod, _ *controllers.PodInfo, _ string) error {
+			b.nft = append(b.nft, p.Name)
+			return nil
+		},
+		FlushRulesForPodFunc: func(_, podName, _, _ string) error {
+			b.flushed = append(b.flushed, podName)
+			return nil
+		},
+	}
+}
+
+func TestReconcile_BackendAnnotationSelectsTCXForRuncPod(t *testing.T) {
+	namespace, nodeName := testScope(t)
+	pod := annotatedPod(t, namespace, nodeName, "runc", controllers.DefaultBackendAnnotation, "tcx")
+	seedObjects(t, newNamespace(namespace, nil), newNode(nodeName), pod)
+	setPodRunning(t, pod)
+
+	sandbox := &fakeSandbox{}
+	rec := &backendRecorder{}
+	r := rec.reconciler(t, nodeName, sandbox)
+	for i := 0; i < 2; i++ {
+		if err := reconcileNode(t, r); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+	}
+	if _, ok := sandbox.applied[pod.UID]; !ok || len(rec.nft) != 0 {
+		t.Fatalf("TCX applied = %v, nftables applied to %v; want TCX only", sandbox.applied, rec.nft)
+	}
+	// The pod's nftables rules, e.g. from before the annotation was set, are
+	// removed once.
+	if !slices.Equal(rec.flushed, []string{"runc"}) {
+		t.Errorf("nftables rules flushed for %v, want once for runc", rec.flushed)
+	}
+}
+
+func TestReconcile_BackendAnnotationSelectsNftablesForKataPod(t *testing.T) {
+	namespace, nodeName := testScope(t)
+	pod := annotatedPod(t, namespace, nodeName, "kata", controllers.DefaultBackendAnnotation, " NFTables ")
+	seedObjects(t, newNamespace(namespace, nil), newNode(nodeName), pod)
+	setPodRunning(t, pod)
+
+	sandbox := &fakeSandbox{pinned: []tcx.Endpoint{{PodUID: pod.UID, Interface: "net1"}}}
+	rec := &backendRecorder{}
+	if err := reconcileNode(t, rec.reconciler(t, nodeName, sandbox)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !slices.Equal(rec.nft, []string{"kata"}) || len(sandbox.applied) != 0 {
+		t.Fatalf("nftables applied to %v, TCX applied = %v; want nftables only", rec.nft, sandbox.applied)
+	}
+	if len(sandbox.pinned) != 0 {
+		t.Errorf("TCX programs of a pod that moved to nftables must be removed, pinned = %v", sandbox.pinned)
+	}
+}
+
+func TestReconcile_InvalidBackendAnnotationFallsBack(t *testing.T) {
+	namespace, nodeName := testScope(t)
+	pod := annotatedPod(t, namespace, nodeName, "kata", controllers.DefaultBackendAnnotation, "ebpf")
+	seedObjects(t, newNamespace(namespace, nil), newNode(nodeName), pod)
+	setPodRunning(t, pod)
+
+	sandbox := &fakeSandbox{}
+	rec := &backendRecorder{}
+	if err := reconcileNode(t, rec.reconciler(t, nodeName, sandbox)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if _, ok := sandbox.applied[pod.UID]; !ok || len(rec.nft) != 0 {
+		t.Fatalf("an invalid value must fall back to the RuntimeClass (TCX for kata); TCX = %v, nftables = %v", sandbox.applied, rec.nft)
+	}
+}
+
+func TestReconcile_CustomBackendAnnotationKey(t *testing.T) {
+	namespace, nodeName := testScope(t)
+	pod := annotatedPod(t, namespace, nodeName, "runc", "example.com/dataplane", "tcx")
+	seedObjects(t, newNamespace(namespace, nil), newNode(nodeName), pod)
+	setPodRunning(t, pod)
+
+	sandbox := &fakeSandbox{}
+	rec := &backendRecorder{}
+	r := rec.reconciler(t, nodeName, sandbox)
+	r.BackendAnnotation = "example.com/dataplane"
+	if err := reconcileNode(t, r); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if _, ok := sandbox.applied[pod.UID]; !ok {
+		t.Fatalf("the configured annotation key must select TCX")
+	}
+
+	// With the default key configured, the custom annotation means nothing.
+	rec = &backendRecorder{}
+	sandbox = &fakeSandbox{}
+	if err := reconcileNode(t, rec.reconciler(t, nodeName, sandbox)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(sandbox.applied) != 0 || !slices.Equal(rec.nft, []string{"runc"}) {
+		t.Errorf("TCX = %v, nftables = %v; want nftables for an unrecognized annotation key", sandbox.applied, rec.nft)
+	}
+}
+
+func TestReconcile_BackendAnnotationTCXWithoutDatapath(t *testing.T) {
+	namespace, nodeName := testScope(t)
+	pod := annotatedPod(t, namespace, nodeName, "runc", controllers.DefaultBackendAnnotation, "tcx")
+	seedObjects(t, newNamespace(namespace, nil), newNode(nodeName), pod)
+	setPodRunning(t, pod)
+
+	rec := &backendRecorder{}
+	r := rec.reconciler(t, nodeName, nil)
+	r.TCXUnavailable = errors.New("pin path /sys/fs/bpf/multi-networkpolicy is not on a bpf filesystem")
+	err := reconcileNode(t, r)
+	if err == nil || !strings.Contains(err.Error(), "TCX datapath is unavailable") || !strings.Contains(err.Error(), "bpf filesystem") {
+		t.Fatalf("Reconcile error = %v, want the unavailable datapath and its reason", err)
+	}
+	// Not silently enforced by nftables, which cannot police Kata pods.
+	if len(rec.nft) != 0 {
+		t.Errorf("nftables applied to %v", rec.nft)
+	}
+}
+
 func TestCleanupOnShutdown_RemovesTCXPrograms(t *testing.T) {
 	_, nodeName := testScope(t)
 	sandbox := &fakeSandbox{pinned: []tcx.Endpoint{{PodUID: "p", Interface: "net1"}}}

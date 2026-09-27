@@ -9,6 +9,8 @@ Tests the TCX datapath with real Kata Containers VMs on a kind cluster:
 | `macvtap-ingress` | `kata-qemu-macvtap` | Go | `macvtap` (IPv4) |
 | `default-network` | `kata-qemu` | Go | `tcfilter`, net-attach-def as the primary network (`eth0`) |
 | `default-network-macvtap` | `kata-qemu-macvtap` | Go | `macvtap`, net-attach-def as the primary network (`eth0`) |
+| `backend-annotation` | none (runc) and `kata-qemu` | Go | `multinetworkpolicy.io/backend` forcing `tcx` on a runc pod and `nftables` on a Kata pod, switched at runtime |
+| `backend-annotation` | none (runc) and `kata-qemu` | Go | `multinetworkpolicy.io/backend` forcing `tcx` on a runc pod and `nftables` on a Kata pod, switched at runtime |
 
 ```bash
 cd e2e

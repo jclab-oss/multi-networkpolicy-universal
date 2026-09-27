@@ -32,6 +32,7 @@ import (
 	netdefv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	"github.com/spf13/cobra"
 	"github.com/telekom/multi-networkpolicy-nftables/pkg/controller"
+	"github.com/telekom/multi-networkpolicy-nftables/pkg/controllers"
 	"github.com/telekom/multi-networkpolicy-nftables/pkg/server"
 	"github.com/telekom/multi-networkpolicy-nftables/pkg/tcx"
 
@@ -193,23 +194,34 @@ func run(opts *server.Options) error {
 			klog.Errorf("failed to close CRI connection: %v", cerr)
 		}
 	}()
-	if len(cfg.TCXRuntimeClasses) > 0 {
+	reconciler.BackendAnnotation = cfg.BackendAnnotation
+	reconciler.TCXRuntimeClasses = cfg.TCXRuntimeClasses
+	if len(cfg.TCXRuntimeClasses) > 0 || cfg.BackendAnnotation != "" {
 		datapath, err := tcx.NewDatapath(tcx.Config{PinPath: cfg.BPFPinPath, FlowTableSize: cfg.TCXFlowTableSize})
-		if err != nil {
+		switch {
+		case err == nil:
+			defer func() {
+				if cerr := datapath.Close(); cerr != nil {
+					klog.Errorf("failed to close TCX datapath: %v", cerr)
+				}
+			}()
+			reconciler.TCX = datapath
+			klog.Infof("TCX datapath enabled for runtime classes %v and pods annotated %s=%s (pinned below %s)", cfg.TCXRuntimeClasses, cfg.BackendAnnotation, controllers.BackendTCX, cfg.BPFPinPath)
+		case len(cfg.TCXRuntimeClasses) > 0:
 			return fmt.Errorf("set up TCX datapath: %w", err)
+		default:
+			// Only the annotation asks for it: run without, and report the
+			// pods that request it (typically bpffs is not mounted).
+			reconciler.TCXUnavailable = err
+			klog.Infof("TCX datapath unavailable, pods annotated %s=%s are not policed: %v", cfg.BackendAnnotation, controllers.BackendTCX, err)
 		}
-		defer func() {
-			if cerr := datapath.Close(); cerr != nil {
-				klog.Errorf("failed to close TCX datapath: %v", cerr)
-			}
-		}()
-		reconciler.TCX = datapath
-		reconciler.TCXRuntimeClasses = cfg.TCXRuntimeClasses
-		klog.Infof("TCX datapath enabled for runtime classes %v (pinned below %s)", cfg.TCXRuntimeClasses, cfg.BPFPinPath)
-	} else if err := tcx.RemovePinned(cfg.BPFPinPath); err != nil {
-		// Programs of an earlier run with the datapath enabled would keep
-		// enforcing the policy they were loaded with.
-		klog.Errorf("failed to remove TCX programs of an earlier run: %v", err)
+	}
+	if reconciler.TCX == nil {
+		if err := tcx.RemovePinned(cfg.BPFPinPath); err != nil {
+			// Programs of an earlier run with the datapath enabled would keep
+			// enforcing the policy they were loaded with.
+			klog.Errorf("failed to remove TCX programs of an earlier run: %v", err)
+		}
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup reconciler: %w", err)

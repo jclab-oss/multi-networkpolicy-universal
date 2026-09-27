@@ -223,3 +223,18 @@ func TestNodePredicate_OtherNode(t *testing.T) {
 		t.Fatal("expected non-matching node to be filtered")
 	}
 }
+
+func TestPodPredicate_Update_BackendAnnotationChanged(t *testing.T) {
+	const key = "example.com/backend"
+	oldPod := &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+	newPod := &corev1.Pod{
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{key: "tcx"}},
+	}
+	if !PodPredicate(key).Update(event.UpdateEvent{ObjectOld: oldPod, ObjectNew: newPod}) {
+		t.Fatal("expected a change of the configured backend annotation to pass")
+	}
+	if PodPredicate().Update(event.UpdateEvent{ObjectOld: oldPod, ObjectNew: newPod}) {
+		t.Fatal("expected an unconfigured annotation to be ignored")
+	}
+}

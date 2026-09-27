@@ -33,6 +33,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/telekom/multi-networkpolicy-nftables/pkg/controller"
 	"github.com/telekom/multi-networkpolicy-nftables/pkg/server"
+	"github.com/telekom/multi-networkpolicy-nftables/pkg/tcx"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -192,6 +193,24 @@ func run(opts *server.Options) error {
 			klog.Errorf("failed to close CRI connection: %v", cerr)
 		}
 	}()
+	if len(cfg.TCXRuntimeClasses) > 0 {
+		datapath, err := tcx.NewDatapath(tcx.Config{PinPath: cfg.BPFPinPath, FlowTableSize: cfg.TCXFlowTableSize})
+		if err != nil {
+			return fmt.Errorf("set up TCX datapath: %w", err)
+		}
+		defer func() {
+			if cerr := datapath.Close(); cerr != nil {
+				klog.Errorf("failed to close TCX datapath: %v", cerr)
+			}
+		}()
+		reconciler.TCX = datapath
+		reconciler.TCXRuntimeClasses = cfg.TCXRuntimeClasses
+		klog.Infof("TCX datapath enabled for runtime classes %v (pinned below %s)", cfg.TCXRuntimeClasses, cfg.BPFPinPath)
+	} else if err := tcx.RemovePinned(cfg.BPFPinPath); err != nil {
+		// Programs of an earlier run with the datapath enabled would keep
+		// enforcing the policy they were loaded with.
+		klog.Errorf("failed to remove TCX programs of an earlier run: %v", err)
+	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup reconciler: %w", err)
 	}

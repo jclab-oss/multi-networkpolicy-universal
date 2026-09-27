@@ -19,7 +19,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -28,8 +27,6 @@ import (
 
 	nftables "github.com/google/nftables"
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 )
 
@@ -103,57 +100,14 @@ func ApplyPolicyRulesForPodAndFamily(ctx context.Context, deps controllers.Polic
 		return fmt.Errorf("bootstrap netfilter rules returned nil state for pod [%s]", podNamespacedName(pod))
 	}
 
-	var ingressPolicies []internalPolicy
-	var egressPolicies []internalPolicy
-
-	for _, policy := range policyMap {
-		if policy.GetNamespace() != pod.Namespace {
-			continue
-		}
-		if policy.Spec.PodSelector.Size() != 0 {
-			policyPodSelector, err := metav1.LabelSelectorAsSelector(&policy.Spec.PodSelector)
-			if err != nil {
-				klog.Errorf("bad label selector for policy [%s]: %v", policyNamespacedName(policy), err)
-				continue
-			}
-			if !policyPodSelector.Matches(labels.Set(pod.Labels)) {
-				continue
-			}
-		}
-
-		ingressEnable, egressEnable := getEnabledPolicyTypes(policy)
-		klog.V(8).Infof("ingress/egress = %v/%v\n", ingressEnable, egressEnable)
-
-		policyNetworksAnnot, ok := policy.GetAnnotations()[PolicyNetworkAnnotation]
-		if !ok {
-			continue
-		}
-		policyNetworksAnnot = strings.ReplaceAll(policyNetworksAnnot, " ", "")
-		policyNetworks := strings.Split(policyNetworksAnnot, ",")
-		for pidx, networkName := range policyNetworks {
-			if !strings.ContainsAny(networkName, "/") {
-				policyNetworks[pidx] = fmt.Sprintf("%s/%s", policy.GetNamespace(), networkName)
-			}
-		}
-		slices.Sort(policyNetworks)
-
-		if podInfo.CheckPolicyNetwork(policyNetworks) {
-			if ingressEnable {
-				ingressPolicies = append(ingressPolicies, internalPolicy{policy: policy, policyNetworks: policyNetworks})
-			}
-			if egressEnable {
-				egressPolicies = append(egressPolicies, internalPolicy{policy: policy, policyNetworks: policyNetworks})
-			}
-		}
-	}
+	selectedIngress, selectedEgress := controllers.SelectPolicies(policyMap, pod, podInfo)
+	ingressPolicies := toInternalPolicies(selectedIngress)
+	egressPolicies := toInternalPolicies(selectedEgress)
 
 	err = nftState.applyCommonChainRules(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to apply common chain rules for pod [%s]: %w", podNamespacedName(pod), err)
 	}
-
-	slices.SortStableFunc(ingressPolicies, CompareInternalPolicy)
-	slices.SortStableFunc(egressPolicies, CompareInternalPolicy)
 
 	if len(ingressPolicies) > 0 {
 		forceUpdate := false
@@ -218,17 +172,15 @@ func policyNamespacedName(o *multiv1beta1.MultiNetworkPolicy) string {
 }
 
 func getEnabledPolicyTypes(policy *multiv1beta1.MultiNetworkPolicy) (bool, bool) {
-	var ingressEnable, egressEnable bool
-	if len(policy.Spec.PolicyTypes) > 0 {
-		for _, v := range policy.Spec.PolicyTypes {
-			if strings.EqualFold(string(v), string(multiv1beta1.PolicyTypeIngress)) {
-				ingressEnable = true
-			} else if strings.EqualFold(string(v), string(multiv1beta1.PolicyTypeEgress)) {
-				egressEnable = true
-			}
-		}
-		return ingressEnable, egressEnable
-	}
+	return controllers.EnabledPolicyTypes(policy)
+}
 
-	return policy.Spec.Ingress != nil, policy.Spec.Egress != nil
+// toInternalPolicies keeps the selection order, which SelectPolicies already
+// sorted by namespace/name.
+func toInternalPolicies(selected []controllers.SelectedPolicy) []internalPolicy {
+	policies := make([]internalPolicy, 0, len(selected))
+	for _, sp := range selected {
+		policies = append(policies, internalPolicy{policy: sp.Policy, policyNetworks: sp.Networks})
+	}
+	return policies
 }

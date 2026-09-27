@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: multi-networkpolicy-ds-amd64
+  namespace: kube-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: multi-networkpolicy
+          args:
+            - --host-prefix=/host
+            - --container-runtime-endpoint=/run/containerd/containerd.sock
+            - --sync-period=1
+            - --network-plugins=macvlan,bond,ipvlan
+            - -v=4
+            - --health-port=8081
+            - --health-bind-address=127.0.0.1
+            - --tcx-runtime-classes=kata-qemu,kata-qemu-runtime-rs,kata-qemu-macvtap
+          volumeMounts:
+            - name: host
+              mountPath: /host
+              readOnly: true
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+      volumes:
+        - name: host
+          hostPath:
+            path: /
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory

@@ -1,0 +1,17 @@
+# DaemonSet for clusters that run Kata Containers (or another sandboxed
+# runtime whose pod traffic bypasses netfilter). Pods of the RuntimeClasses
+# listed in --tcx-runtime-classes are policed by the TCX datapath, all other
+# pods by nftables. Adjust the runtime classes and the CRI endpoint to the
+# cluster.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - path: daemonset-kata.yaml
+    target:
+      group: apps
+      version: v1
+      kind: DaemonSet
+      name: multi-networkpolicy-ds-amd64
+      namespace: kube-system

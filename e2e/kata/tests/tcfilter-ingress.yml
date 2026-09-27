@@ -1,0 +1,106 @@
+# A Kata pod (Go runtime, "tcfilter" networking) that accepts ingress on net1
+# from client-a only. client-a runs in Kata as well, client-b uses the default
+# runtime, so the policy mixes both backends. The network is dual-stack.
+---
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  namespace: default
+  name: macvlan-kata-tcfilter
+spec:
+  config: '{
+            "cniVersion": "0.3.1",
+            "name": "macvlan-kata-tcfilter",
+            "plugins": [
+                {
+                    "type": "macvlan",
+                    "mode": "bridge",
+                    "ipam":{
+                      "type":"host-local",
+                      "ranges": [
+                        [{"subnet": "2.2.20.0/24", "rangeStart": "2.2.20.8", "rangeEnd": "2.2.20.67"}],
+                        [{"subnet": "2001:db8:20::/64", "rangeStart": "2001:db8:20::8", "rangeEnd": "2001:db8:20::67"}]
+                      ]
+                    }
+                }]
+        }'
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: test-kata-tcfilter
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-server
+  namespace: test-kata-tcfilter
+  annotations:
+    k8s.v1.cni.cncf.io/networks: default/macvlan-kata-tcfilter
+  labels:
+    app: test-kata-tcfilter
+    name: pod-server
+spec:
+  runtimeClassName: kata-qemu
+  terminationGracePeriodSeconds: 0
+  containers:
+  - name: server
+    image: localhost:5000/multi-networkpolicy-nftables:e2e-test
+    imagePullPolicy: Never
+    command: ["nc", "-klp", "5555"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-client-a
+  namespace: test-kata-tcfilter
+  annotations:
+    k8s.v1.cni.cncf.io/networks: default/macvlan-kata-tcfilter
+  labels:
+    app: test-kata-tcfilter
+    name: pod-client-a
+spec:
+  runtimeClassName: kata-qemu
+  terminationGracePeriodSeconds: 0
+  containers:
+  - name: client
+    image: localhost:5000/multi-networkpolicy-nftables:e2e-test
+    imagePullPolicy: Never
+    command: ["nc", "-klp", "5555"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-client-b
+  namespace: test-kata-tcfilter
+  annotations:
+    k8s.v1.cni.cncf.io/networks: default/macvlan-kata-tcfilter
+  labels:
+    app: test-kata-tcfilter
+    name: pod-client-b
+spec:
+  terminationGracePeriodSeconds: 0
+  containers:
+  - name: client
+    image: localhost:5000/multi-networkpolicy-nftables:e2e-test
+    imagePullPolicy: Never
+    command: ["nc", "-klp", "5555"]
+    securityContext:
+      privileged: true
+---
+apiVersion: k8s.cni.cncf.io/v1beta1
+kind: MultiNetworkPolicy
+metadata:
+  name: test-kata-tcfilter-ingress
+  namespace: test-kata-tcfilter
+  annotations:
+    k8s.v1.cni.cncf.io/policy-for: default/macvlan-kata-tcfilter
+spec:
+  podSelector:
+    matchLabels:
+      name: pod-server
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          name: pod-client-a

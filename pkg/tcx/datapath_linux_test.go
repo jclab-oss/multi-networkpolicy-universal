@@ -368,3 +368,97 @@ func TestDatapathPlainPod(t *testing.T) {
 	expectBlocked(t, client, "10.9.0.2:5556", "port not in policy")
 	expectBlocked(t, pod, "10.9.0.1:7777", "egress denied")
 }
+
+// bridgeTopology reproduces Virtink's bridge mode (KubeVirt's bridge binding
+// builds the same): the CNI interface is renamed, enslaved to a bridge that
+// also holds the VM's tap device, and a dummy device takes over its name.
+// Traffic of the VM is bridged and never reaches the namespace's IP stack.
+type bridgeTopology struct {
+	t      *testing.T
+	client string
+	pod    string
+	guest  string
+}
+
+func newBridgeTopology(t *testing.T, suffix string) *bridgeTopology {
+	t.Helper()
+	requireTools(t, "ip")
+	id := fmt.Sprintf("%d%s", os.Getpid()%100000, suffix)
+	b := &bridgeTopology{t: t, client: "mnpc" + id, pod: "mnpp" + id, guest: "mnpg" + id}
+	for _, n := range []string{b.client, b.pod, b.guest} {
+		sh(t, "ip", "netns", "add", n)
+	}
+	t.Cleanup(b.destroy)
+
+	sh(t, "ip", "link", "add", "c0", "netns", b.client, "type", "veth", "peer", "name", "eth0", "netns", b.pod)
+	sh(t, "ip", "-n", b.client, "addr", "add", "10.9.0.1/24", "dev", "c0")
+
+	sh(t, "ip", "-n", b.pod, "link", "add", "br-eth0", "type", "bridge")
+	sh(t, "ip", "-n", b.pod, "addr", "add", "169.254.200.1/30", "dev", "br-eth0")
+	sh(t, "ip", "-n", b.pod, "link", "set", "eth0", "down")
+	sh(t, "ip", "-n", b.pod, "link", "set", "eth0", "name", "eth0-nic")
+	sh(t, "ip", "-n", b.pod, "link", "set", "eth0-nic", "master", "br-eth0")
+	// The real dummy keeps the pod address; here it stays without one, so the
+	// VM is the only answer to an ARP request for it.
+	sh(t, "ip", "-n", b.pod, "link", "add", "eth0", "type", "dummy")
+
+	// Stands in for the tap device of the VM.
+	sh(t, "ip", "link", "add", "tap-eth0", "netns", b.pod, "type", "veth", "peer", "name", "g0", "netns", b.guest)
+	sh(t, "ip", "-n", b.pod, "link", "set", "tap-eth0", "master", "br-eth0")
+	sh(t, "ip", "-n", b.guest, "addr", "add", "10.9.0.2/24", "dev", "g0")
+
+	for _, l := range [][2]string{{b.client, "c0"}, {b.client, "lo"}, {b.pod, "eth0"}, {b.pod, "eth0-nic"},
+		{b.pod, "br-eth0"}, {b.pod, "tap-eth0"}, {b.guest, "g0"}, {b.guest, "lo"}} {
+		sh(t, "ip", "-n", l[0], "link", "set", l[1], "up")
+	}
+	return b
+}
+
+func (b *bridgeTopology) destroy() {
+	for _, n := range []string{b.client, b.pod, b.guest} {
+		_ = exec.Command("ip", "netns", "del", n).Run()
+	}
+}
+
+func (b *bridgeTopology) podNetns() string { return "/run/netns/" + b.pod }
+
+func TestDatapathVirtinkBridge(t *testing.T) {
+	d := newTestDatapath(t, DefaultInterfaceRule)
+	b := newBridgeTopology(t, "v")
+	const podUID = "virtink-pod-uid"
+
+	serve(t, b.guest, "10.9.0.2:5555")
+	serve(t, b.guest, "10.9.0.2:5556")
+	serve(t, b.client, "10.9.0.1:7777")
+
+	expectConnect(t, b.client, "10.9.0.2:5555", "baseline ingress")
+	expectConnect(t, b.guest, "10.9.0.1:7777", "baseline egress")
+
+	if err := d.Apply(b.podNetns(), podUID, kataPolicies(t, true)); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	expectConnect(t, b.client, "10.9.0.2:5555", "allowed port")
+	expectBlocked(t, b.client, "10.9.0.2:5556", "port not in policy")
+	expectBlocked(t, b.guest, "10.9.0.1:7777", "egress denied")
+
+	// The programs sit on the renamed device, the only one that carries the
+	// traffic, not on the dummy that took over the name.
+	if n := countTCX(t, b.pod, "eth0-nic"); n != 2 {
+		t.Errorf("TCX programs on eth0-nic = %d, want 2", n)
+	}
+	if n := countTCX(t, b.pod, "eth0"); n != 0 {
+		t.Errorf("TCX programs on the dummy eth0 = %d, want 0", n)
+	}
+
+	// Without a rule naming it, the dummy is all there is to police: that
+	// must fail instead of silently enforcing nothing.
+	plain := newTestDatapath(t)
+	err := plain.Apply(b.podNetns(), podUID, kataPolicies(t, true))
+	if err == nil {
+		t.Fatal("Apply without interface rules succeeded, want an error about the dummy device")
+	}
+	if !strings.Contains(err.Error(), "dummy") {
+		t.Errorf("Apply without interface rules: %v, want an error about the dummy device", err)
+	}
+	expectConnect(t, b.client, "10.9.0.2:5555", "policy still enforced after the failed apply")
+}

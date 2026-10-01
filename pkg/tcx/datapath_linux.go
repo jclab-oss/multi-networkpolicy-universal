@@ -192,7 +192,7 @@ func (d *Datapath) applyEndpoint(netns ns.NetNS, podUID types.UID, ep *EndpointP
 		if err != nil {
 			return err
 		}
-		target, err := enforcementLink(all, ep.Interface)
+		target, err := enforcementLink(all, ep.Interface, d.cfg.InterfaceRules)
 		if err != nil {
 			return err
 		}

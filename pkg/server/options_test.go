@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/telekom/multi-networkpolicy-nftables/pkg/tcx"
 	"io"
 	"reflect"
 	"testing"
@@ -156,9 +157,14 @@ func TestAddFlagsAcceptsDeprecatedIptablesStateFlagNoop(t *testing.T) {
 	fs.SetOutput(io.Discard)
 	opts.AddFlags(fs)
 
+	// AddFlags registers the klog flags on the global flag set, so a test
+	// binary can only call it once: flags that need the real registration are
+	// parsed here.
 	if err := fs.Parse([]string{
 		"--pod-iptables=/tmp/old-state",
 		"--container-runtime-endpoint=/run/crio/crio.sock",
+		`--tcx-interface-rules=^net(\d+)$=vmtap${1}`,
+		`--tcx-interface-rules=^eth0$=eth0-vm`,
 	}); err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
@@ -174,8 +180,14 @@ func TestAddFlagsAcceptsDeprecatedIptablesStateFlagNoop(t *testing.T) {
 		t.Fatal("deprecated pod-iptables flag has no deprecation message")
 	}
 
-	if _, err := opts.BuildReconcilerConfig(); err != nil {
+	cfg, err := opts.BuildReconcilerConfig()
+	if err != nil {
 		t.Fatalf("BuildReconcilerConfig() error = %v", err)
+	}
+	// The first use of the repeatable flag replaces the default rule, further
+	// ones are appended.
+	if want := []string{`^net(\d+)$=vmtap${1}`, `^eth0$=eth0-vm`}; !reflect.DeepEqual(cfg.TCXInterfaceRules, want) {
+		t.Fatalf("TCXInterfaceRules = %#v, want %#v", cfg.TCXInterfaceRules, want)
 	}
 }
 
@@ -212,5 +224,42 @@ func TestNewOptionsDefaultsBackendAnnotation(t *testing.T) {
 	}
 	if cfg.BackendAnnotation != "multinetworkpolicy.io/backend" {
 		t.Errorf("BackendAnnotation = %q, want the default key", cfg.BackendAnnotation)
+	}
+}
+
+func TestOptionsValidateInterfaceRules(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name  string
+		rules []string
+		valid bool
+	}{
+		{name: "default", rules: []string{tcx.DefaultInterfaceRule}, valid: true},
+		{name: "disabled", rules: nil, valid: true},
+		{name: "several rules", rules: []string{`^net\d+$=vmtap`, tcx.DefaultInterfaceRule}, valid: true},
+		{name: "missing separator", rules: []string{"^eth0$"}},
+		{name: "invalid regular expression", rules: []string{`^(eth0$=x`}},
+	} {
+		opts := NewOptions()
+		opts.containerRuntimeEndpoint = "/run/containerd/containerd.sock"
+		opts.tcxInterfaceRules = tt.rules
+		if err := opts.Validate(); (err == nil) != tt.valid {
+			t.Errorf("Validate() with tcx-interface-rules %q: error = %v, want valid = %v", tt.rules, err, tt.valid)
+		}
+	}
+}
+
+func TestNewOptionsDefaultsInterfaceRules(t *testing.T) {
+	t.Parallel()
+
+	opts := NewOptions()
+	opts.containerRuntimeEndpoint = "/run/containerd/containerd.sock"
+	cfg, err := opts.BuildReconcilerConfig()
+	if err != nil {
+		t.Fatalf("BuildReconcilerConfig() error = %v", err)
+	}
+	if want := []string{tcx.DefaultInterfaceRule}; !reflect.DeepEqual(cfg.TCXInterfaceRules, want) {
+		t.Errorf("TCXInterfaceRules = %#v, want %#v", cfg.TCXInterfaceRules, want)
 	}
 }

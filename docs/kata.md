@@ -1,13 +1,16 @@
 # Kata Containers and other sandboxed runtimes
 
-Pods of a sandboxed runtime such as [Kata Containers](https://katacontainers.io/)
-run inside a VM. The nftables rules this daemon installs in the pod network
-namespace never see their traffic:
+Pods of a sandboxed runtime such as [Kata Containers](https://katacontainers.io/),
+and pods that run a VM such as [Virtink](https://github.com/smartxworks/virtink)
+and [KubeVirt](https://kubevirt.io/), run their workload inside a VM. The
+nftables rules this daemon installs in the pod network namespace never see
+their traffic:
 
-| Kata `internetworking_model` | How packets reach the VM | nftables `input`/`output` |
+| Runtime | How packets reach the VM | nftables `input`/`output` |
 |---|---|---|
-| `tcfilter` (default) | TC `mirred` redirect between the CNI interface and the VM's tap device | bypassed: the redirect takes the packet before netfilter |
-| `macvtap` | macvtap device on top of the CNI interface | bypassed: the macvtap `rx_handler` takes the packet before the IP stack |
+| Kata `tcfilter` (default) | TC `mirred` redirect between the CNI interface and the VM's tap device | bypassed: the redirect takes the packet before netfilter |
+| Kata `macvtap` | macvtap device on top of the CNI interface | bypassed: the macvtap `rx_handler` takes the packet before the IP stack |
+| Virtink `bridge`, KubeVirt bridge binding | a bridge in the pod namespace joins the CNI interface and the VM's tap device | bypassed: the frame is bridged and never reaches the namespace's IP stack |
 
 For such pods the daemon enforces MultiNetworkPolicy with an eBPF program on
 the TCX hooks (Linux 6.6+) of the device the VM's traffic passes instead. All other pods keep using nftables; one daemon handles
@@ -21,6 +24,10 @@ tcfilter:  peer ──► net1 [TCX ingress] ──TCX_NEXT──► Kata tc red
 
 macvtap:   peer ──► (lower device) ──► tapN_kata [TCX ingress] ──► VM
            peer ◄── (lower device) ◄── tapN_kata [TCX egress]  ◄── VM
+
+bridge:    peer ──► eth0-nic [TCX ingress] ──► br-eth0 ──► tap-eth0 ──► VM
+           peer ◄── eth0-nic [TCX egress]  ◄── br-eth0 ◄── tap-eth0 ◄── VM
+           (eth0 is a dummy device holding the pod address: no traffic)
 ```
 
 * **Nothing of the runtime is modified.** With `tcfilter`, the programs sit
@@ -93,6 +100,11 @@ macvtap:   peer ──► (lower device) ──► tapN_kata [TCX ingress] ─�
       `--tcx-runtime-classes`;
    3. `nftables`.
 
+   A pod that runs a VM without a RuntimeClass of its own, such as a Virtink
+   or KubeVirt VM pod, is selected by the annotation. Virtink copies the
+   annotations of a `VirtualMachine` to its pod, so annotating the
+   `VirtualMachine` with `multinetworkpolicy.io/backend: tcx` is enough.
+
    The annotation works in both directions: `nftables` keeps a pod of a
    listed RuntimeClass on nftables (for example a runtime class whose pods
    do reach netfilter), `tcx` moves any pod to the TCX datapath, a runc pod
@@ -123,6 +135,55 @@ macvtap:   peer ──► (lower device) ──► tapN_kata [TCX ingress] ─�
 | `--backend-annotation` | `multinetworkpolicy.io/backend` | Pod annotation that selects the backend, overriding `--tcx-runtime-classes`; empty disables it |
 | `--bpf-pin-path` | `/sys/fs/bpf/multi-networkpolicy` | bpffs directory for the pinned programs and flow tables |
 | `--tcx-flow-table-size` | `65536` | Connections tracked across all TCX-policed pods of the node |
+| `--tcx-interface-rules` | `^(.+)$=${1}-nic` | Rules naming the device policed for a pod interface, see below |
+
+### Which device is policed
+
+The programs are attached to the device that actually carries the traffic of a
+pod interface, which is not always the interface the pod's network status
+names:
+
+* Kata's `macvtap` model stacks a macvtap device on the interface. It is found
+  from the link topology, nothing to configure.
+* A runtime that bridges a VM to the pod interface **renames** it and leaves a
+  dummy device behind under the original name. Virtink's bridge mode turns
+  `eth0` into `eth0-nic`, enslaves it to `br-eth0` together with the VM's
+  `tap-eth0`, and creates a dummy `eth0` that keeps the pod address so the
+  address stays visible in the namespace; KubeVirt's bridge binding does the
+  same. Only the renamed device carries traffic.
+
+`--tcx-interface-rules` maps the name of a pod interface to the name of the
+device to police, as `<regex>=<replacement>` split at the first `=`, with
+`${1}`, `${2}` … expanding the submatches of the regular expression. The
+default covers the rename above:
+
+```
+--tcx-interface-rules='^(.+)$=${1}-nic'
+```
+
+The first rule that both matches the interface and names a device the pod has
+is used, otherwise the interface itself, so the default changes nothing for a
+pod without a renamed device. Repeat the flag for more rules; they are tried
+in order:
+
+```
+--tcx-interface-rules='^(.+)$=${1}-nic' --tcx-interface-rules='^net(\d+)$=vmtap${1}'
+```
+
+Pass it empty to disable the rules and always police the interface itself.
+
+Because a dummy device carries no traffic, policing it would enforce nothing
+at all. The daemon refuses to and reports the pod instead:
+
+```
+interface eth0: inspect interface: eth0 is a dummy device and carries no
+traffic; name the device that does with --tcx-interface-rules
+```
+
+A `bridge` mode VM reaches the policy through the CNI interface only. Traffic
+between the VM and the pod namespace itself, such as the DHCP server Virtink
+runs on the bridge to hand the pod address to the VM, does not pass that
+device and is not policed.
 
 ### Requirements
 
@@ -203,5 +264,11 @@ Linux 6.8 during development:
 Each model is tested with the policed net-attach-def as a secondary network
 (`net1`) and as the primary network (`eth0`, Multus default-network).
 
-The datapath itself is also tested without Kata, against a network namespace
-setup that reproduces Kata's tc redirect filters (`pkg/tcx`, privileged tests).
+The datapath itself is also tested without Kata, against network namespace
+setups that reproduce Kata's tc redirect filters and Virtink's bridge mode
+(`pkg/tcx`, privileged tests).
+
+Virtink has not been run in CI: its bridge mode is covered by the reproduced
+topology only — a renamed interface enslaved to a bridge with the VM behind a
+tap device, and a dummy device under the original name — which was read off
+Virtink's `setupBridgeNetwork`.

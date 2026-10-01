@@ -197,7 +197,15 @@ func run(opts *server.Options) error {
 	reconciler.BackendAnnotation = cfg.BackendAnnotation
 	reconciler.TCXRuntimeClasses = cfg.TCXRuntimeClasses
 	if len(cfg.TCXRuntimeClasses) > 0 || cfg.BackendAnnotation != "" {
-		datapath, err := tcx.NewDatapath(tcx.Config{PinPath: cfg.BPFPinPath, FlowTableSize: cfg.TCXFlowTableSize})
+		interfaceRules, err := tcx.ParseInterfaceRules(cfg.TCXInterfaceRules)
+		if err != nil {
+			return fmt.Errorf("tcx-interface-rules: %w", err)
+		}
+		datapath, err := tcx.NewDatapath(tcx.Config{
+			PinPath:        cfg.BPFPinPath,
+			FlowTableSize:  cfg.TCXFlowTableSize,
+			InterfaceRules: interfaceRules,
+		})
 		switch {
 		case err == nil:
 			defer func() {

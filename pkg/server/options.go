@@ -26,6 +26,7 @@ import (
 
 	"github.com/spf13/pflag"
 	"github.com/telekom/multi-networkpolicy-nftables/pkg/controllers"
+	"github.com/telekom/multi-networkpolicy-nftables/pkg/tcx"
 
 	"k8s.io/apimachinery/pkg/util/validation"
 	nodeutil "k8s.io/component-helpers/node/util"
@@ -62,6 +63,9 @@ type Options struct {
 	// tcxRuntimeClasses lists the RuntimeClass names whose pods are
 	// enforced by the TCX datapath instead of nftables.
 	tcxRuntimeClasses []string
+	// tcxInterfaceRules map a pod interface to the device the TCX datapath
+	// polices for it, as "<regex>=<replacement>".
+	tcxInterfaceRules []string
 	bpfPinPath        string
 	tcxFlowTableSize  uint32
 	backendAnnotation string
@@ -84,6 +88,9 @@ type ReconcilerConfig struct {
 	// TCXRuntimeClasses enables the TCX datapath for pods of these
 	// RuntimeClasses; empty disables it.
 	TCXRuntimeClasses []string
+	// TCXInterfaceRules map a pod interface to the device the TCX datapath
+	// polices for it, as "<regex>=<replacement>".
+	TCXInterfaceRules []string
 	BPFPinPath        string
 	TCXFlowTableSize  uint32
 	// BackendAnnotation is the pod annotation that selects a pod's backend;
@@ -114,6 +121,11 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&o.healthPort, "health-port", 0, "TCP port for the health HTTP server (0 to disable, 1-65535 to enable).")
 	fs.StringVar(&o.healthBindAddress, "health-bind-address", "", "IP address the health HTTP server binds to (empty = all interfaces, 127.0.0.1 = loopback only).")
 	fs.StringSliceVar(&o.tcxRuntimeClasses, "tcx-runtime-classes", nil, "RuntimeClass names whose pods are policed by eBPF programs on the TCX hooks of their interfaces instead of nftables, for sandboxed runtimes whose traffic bypasses netfilter such as Kata Containers (e.g. \"kata,kata-qemu\"). Requires Linux 6.6 or later and bpffs.")
+	fs.StringArrayVar(&o.tcxInterfaceRules, "tcx-interface-rules", []string{tcx.DefaultInterfaceRule},
+		"Rules that map a pod interface to the device whose TCX hooks are policed for it, as \"<regex>=<replacement>\" "+
+			"with ${1} expanding a submatch. The first rule that matches the interface and names a device of the pod is used, "+
+			"else the interface itself. Repeat the flag for more rules, pass it empty to disable. The default follows the rename "+
+			"of runtimes that bridge a VM to the pod interface, such as Virtink and KubeVirt.")
 	fs.StringVar(&o.bpfPinPath, "bpf-pin-path", defaultBPFPinPath, "bpffs directory where the TCX datapath pins its programs and flow tables.")
 	fs.Uint32Var(&o.tcxFlowTableSize, "tcx-flow-table-size", defaultTCXFlowTableSize, "Number of connections the TCX datapath tracks across all pods of the node.")
 	fs.StringVar(&o.backendAnnotation, "backend-annotation", controllers.DefaultBackendAnnotation, "Pod annotation that selects the pod's enforcement backend, \"tcx\" or \"nftables\", overriding --tcx-runtime-classes. Empty disables it.")
@@ -158,6 +170,9 @@ func (o *Options) Validate() error {
 		if strings.TrimSpace(rc) == "" {
 			return fmt.Errorf("tcx-runtime-classes must not contain empty names")
 		}
+	}
+	if _, err := tcx.ParseInterfaceRules(o.tcxInterfaceRules); err != nil {
+		return fmt.Errorf("tcx-interface-rules: %w", err)
 	}
 	o.backendAnnotation = strings.TrimSpace(o.backendAnnotation)
 	if o.backendAnnotation != "" {
@@ -213,6 +228,7 @@ func (o *Options) BuildReconcilerConfig() (*ReconcilerConfig, error) {
 			AllowDstPrefix: o.allowDstPrefix,
 		},
 		TCXRuntimeClasses: o.tcxRuntimeClasses,
+		TCXInterfaceRules: o.tcxInterfaceRules,
 		BPFPinPath:        o.bpfPinPath,
 		TCXFlowTableSize:  o.tcxFlowTableSize,
 		BackendAnnotation: o.backendAnnotation,
@@ -223,6 +239,7 @@ func (o *Options) BuildReconcilerConfig() (*ReconcilerConfig, error) {
 func NewOptions() *Options {
 	return &Options{
 		containerRuntime:  controllers.Cri,
+		tcxInterfaceRules: []string{tcx.DefaultInterfaceRule},
 		bpfPinPath:        defaultBPFPinPath,
 		tcxFlowTableSize:  defaultTCXFlowTableSize,
 		backendAnnotation: controllers.DefaultBackendAnnotation,

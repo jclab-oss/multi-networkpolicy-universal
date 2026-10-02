@@ -23,7 +23,7 @@ const (
 
 // newTestDatapath creates a datapath pinned below a private bpffs directory,
 // or skips the test when BPF programs cannot be loaded.
-func newTestDatapath(t *testing.T) *Datapath {
+func newTestDatapath(t *testing.T, interfaceRules ...string) *Datapath {
 	t.Helper()
 	if os.Geteuid() != 0 {
 		t.Skip("requires root to load BPF programs")
@@ -33,7 +33,11 @@ func newTestDatapath(t *testing.T) *Datapath {
 		t.Skip("requires bpffs mounted at /sys/fs/bpf")
 	}
 	pin := filepath.Join("/sys/fs/bpf", fmt.Sprintf("mnp-test-%d-%s", os.Getpid(), sanitize(t.Name())))
-	d, err := NewDatapath(Config{PinPath: pin, FlowTableSize: 1024})
+	rules, err := ParseInterfaceRules(interfaceRules)
+	if err != nil {
+		t.Fatalf("ParseInterfaceRules(%q): %v", interfaceRules, err)
+	}
+	d, err := NewDatapath(Config{PinPath: pin, FlowTableSize: 1024, InterfaceRules: rules})
 	if err != nil {
 		t.Fatalf("NewDatapath: %v", err)
 	}

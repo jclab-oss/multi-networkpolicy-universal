@@ -9,6 +9,9 @@ type Config struct {
 	PinPath string
 	// FlowTableSize is the number of flows tracked across all interfaces.
 	FlowTableSize uint32
+	// InterfaceRules map a pod interface to the device whose TCX hooks are
+	// policed for it, for runtimes that move its traffic to another device.
+	InterfaceRules []InterfaceRule
 }
 
 // Endpoint names a policed pod interface.
